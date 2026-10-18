@@ -75,7 +75,7 @@ def _can_access(task: Task, user: User) -> bool:
 
 
 async def _get_accessible_task(session: AsyncSession, task_id: UUID, user: User) -> Task:
-    task = await session.get(Task, task_id)
+    task = await session.get(Task, task_id, populate_existing=True)
     if task is None or not _can_access(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found")
     return task
@@ -110,13 +110,14 @@ async def me(user: CurrentUser) -> User:
 async def create_task_endpoint(
     payload: TaskCreate, user: CurrentUser, session: SessionDep
 ) -> Task:
-    return await create_task(
+    task = await create_task(
         session,
         prompt=payload.prompt,
         title=payload.title,
         user_id=user.id,
         source=TaskSource.WEB,
     )
+    return await _get_accessible_task(session, task.id, user)
 
 
 @router.get("/tasks", response_model=list[TaskSummary])
