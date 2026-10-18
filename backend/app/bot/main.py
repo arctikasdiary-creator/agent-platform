@@ -24,6 +24,7 @@ BOT_COMMANDS = [
     BotCommand(command="new_task", description="Создать задачу"),
     BotCommand(command="tasks", description="Последние задачи"),
     BotCommand(command="task", description="Детали задачи по id"),
+    BotCommand(command="delete", description="Удалить задачу"),
     BotCommand(command="cancel", description="Отменить ввод"),
 ]
 

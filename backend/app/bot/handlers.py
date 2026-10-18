@@ -23,7 +23,7 @@ from app.core.config import get_settings
 from app.db.models import Approval, ApprovalStatus, StepStatus, Task, TaskSource, TaskStatus
 from app.db.session import SessionFactory
 from app.orchestrator.approvals import ApprovalError, decide_approval
-from app.orchestrator.service import create_task, get_or_create_telegram_user
+from app.orchestrator.service import create_task, delete_task, get_or_create_telegram_user
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "/new_task — поставить задачу\n"
         "/tasks — последние задачи\n"
         "/task &lt;id&gt; — детали задачи\n"
+        "/delete &lt;id&gt; — удалить задачу\n"
         "/cancel — отменить ввод"
     )
 
@@ -327,6 +328,92 @@ async def on_approval_callback(callback: CallbackQuery) -> None:
             await callback.message.reply(f"Решение: {verdict} ({author})")
         except Exception:
             logger.debug("failed to send approval verdict", exc_info=True)
+
+
+@router.message(Command("delete"))
+async def cmd_delete(message: Message) -> None:
+    if message.from_user is None or message.text is None:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Использование: /delete &lt;id или его начало&gt;")
+        return
+    prefix = parts[1].strip().lower()
+    if not TASK_ID_PATTERN.match(prefix):
+        await message.answer("Id задачи состоит из шестнадцатеричных символов и дефисов.")
+        return
+    async with SessionFactory() as session:
+        user = await get_or_create_telegram_user(
+            session, message.from_user.id, message.from_user.full_name
+        )
+        result = await session.execute(
+            select(Task)
+            .where(Task.user_id == user.id, cast(Task.id, String).like(f"{prefix}%"))
+            .order_by(Task.created_at.desc())
+            .limit(5)
+        )
+        matches = list(result.scalars())
+    if not matches:
+        await message.answer("Задача не найдена.")
+        return
+    if len(matches) > 1:
+        lines = ["Найдено несколько задач, уточните id:"]
+        for task in matches:
+            lines.append(f"• <code>{_short_id(task.id)}</code> {html.escape(task.title)}")
+        await message.answer("\n".join(lines))
+        return
+    task = matches[0]
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Удалить", callback_data=f"delconfirm:{task.id}"),
+                InlineKeyboardButton(text="Отмена", callback_data="delcancel"),
+            ]
+        ]
+    )
+    await message.answer(
+        f"Удалить задачу «{html.escape(task.title)}» (<code>{_short_id(task.id)}</code>)?\n"
+        "Это действие необратимо.",
+        reply_markup=markup,
+    )
+
+
+@router.callback_query(F.data == "delcancel")
+async def on_delete_cancel(callback: CallbackQuery) -> None:
+    await callback.answer("Отменено")
+    if callback.message is not None:
+        try:
+            await callback.message.edit_text("Удаление отменено.")
+        except Exception:
+            logger.debug("failed to edit delete-cancel message", exc_info=True)
+
+
+@router.callback_query(F.data.startswith("delconfirm:"))
+async def on_delete_confirm(callback: CallbackQuery) -> None:
+    if callback.data is None or callback.from_user is None:
+        return
+    _, _, raw_id = callback.data.partition(":")
+    try:
+        task_id = UUID(raw_id)
+    except ValueError:
+        await callback.answer("Некорректный идентификатор.", show_alert=True)
+        return
+    async with SessionFactory() as session:
+        task = await session.get(Task, task_id)
+        user = await get_or_create_telegram_user(
+            session, callback.from_user.id, callback.from_user.full_name
+        )
+        if task is None or (task.user_id != user.id and not user.is_admin):
+            await callback.answer("Задача не найдена.", show_alert=True)
+            return
+        title = task.title
+        await delete_task(session, task)
+    await callback.answer("Удалено")
+    if callback.message is not None:
+        try:
+            await callback.message.edit_text(f"Задача «{html.escape(title)}» удалена.")
+        except Exception:
+            logger.debug("failed to edit deleted-task message", exc_info=True)
 
 
 @router.message(F.text)

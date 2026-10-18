@@ -17,6 +17,7 @@ export default function TasksPage() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +67,22 @@ export default function TasksPage() {
   const onLogout = () => {
     clearSession();
     router.replace("/");
+  };
+
+  const onDelete = async (task: TaskSummary) => {
+    if (!window.confirm(`Удалить задачу «${task.title}»? Действие необратимо.`)) {
+      return;
+    }
+    setDeletingId(task.id);
+    setError(null);
+    try {
+      await api.deleteTask(task.id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось удалить задачу");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
@@ -118,14 +135,24 @@ export default function TasksPage() {
         <ul className="task-list">
           {tasks.map((task) => (
             <li key={task.id}>
-              <Link className="task-row" href={`/tasks/${task.id}`}>
-                <span className="badge" data-status={task.status}>
-                  {taskStatusLabel(task.status)}
-                </span>
-                <span className="task-title">{task.title}</span>
-                <span className="muted mono">{shortId(task.id)}</span>
-                <span className="muted">{formatDateTime(task.created_at)}</span>
-              </Link>
+              <div className="task-row-wrap">
+                <Link className="task-row" href={`/tasks/${task.id}`}>
+                  <span className="badge" data-status={task.status}>
+                    {taskStatusLabel(task.status)}
+                  </span>
+                  <span className="task-title">{task.title}</span>
+                  <span className="muted mono">{shortId(task.id)}</span>
+                  <span className="muted">{formatDateTime(task.created_at)}</span>
+                </Link>
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  disabled={deletingId === task.id}
+                  onClick={() => void onDelete(task)}
+                >
+                  {deletingId === task.id ? "Удаляем..." : "Удалить"}
+                </button>
+              </div>
             </li>
           ))}
         </ul>

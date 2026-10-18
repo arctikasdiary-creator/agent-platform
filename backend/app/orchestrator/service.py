@@ -55,6 +55,11 @@ async def create_task(
     return task
 
 
+async def delete_task(session: AsyncSession, task: Task) -> None:
+    await session.delete(task)
+    await session.commit()
+
+
 async def get_or_create_telegram_user(
     session: AsyncSession,
     telegram_id: int,

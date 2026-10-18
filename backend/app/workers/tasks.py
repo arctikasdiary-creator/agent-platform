@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import shutil
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -181,6 +185,19 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
             logger.error("execute_step: step %s or its task not found", step_id)
             return
         task = step.task
+
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            step.status = StepStatus.SKIPPED
+            step.error = f"task is {task.status.value}"
+            step.finished_at = datetime.now(UTC)
+            await session.commit()
+            logger.info(
+                "execute_step: task %s is %s, skipping step %s",
+                task_uuid,
+                task.status.value,
+                step_id,
+            )
+            return
 
         if step.requires_approval:
             approval = step.approval
@@ -434,6 +451,44 @@ async def expire_approvals(ctx: dict[str, Any]) -> None:
     logger.info("expired %d approval(s)", expired_count)
 
 
+_ORPHAN_DIR_MIN_AGE_SECONDS = 900
+
+
+def _sweep_orphan_dirs(root: Path, known_task_ids: set[str]) -> int:
+    if not root.exists():
+        return 0
+    now = time.time()
+    removed = 0
+    for child in root.iterdir():
+        if not child.is_dir() or child.name in known_task_ids:
+            continue
+        try:
+            UUID(child.name)
+        except ValueError:
+            continue
+        try:
+            if now - child.stat().st_mtime < _ORPHAN_DIR_MIN_AGE_SECONDS:
+                continue
+            shutil.rmtree(child, ignore_errors=True)
+        except OSError:
+            logger.warning("failed to remove orphan directory %s", child, exc_info=True)
+            continue
+        removed += 1
+    return removed
+
+
+async def cleanup_orphan_files(ctx: dict[str, Any]) -> None:
+    settings = get_settings()
+    async with SessionFactory() as session:
+        result = await session.execute(select(Task.id))
+        known = {str(task_id) for task_id in result.scalars()}
+    removed = 0
+    for root in (settings.workspaces_root, settings.artifacts_root):
+        removed += await asyncio.to_thread(_sweep_orphan_dirs, root, known)
+    if removed:
+        logger.info("removed %d orphan task directory(ies)", removed)
+
+
 async def cleanup_sandboxes(ctx: dict[str, Any]) -> None:
     settings = get_settings()
     async with SessionFactory() as session:
@@ -471,6 +526,7 @@ class WorkerSettings:
     functions = [plan_task, execute_step]
     cron_jobs = [
         cron(cleanup_sandboxes, minute=set(range(0, 60, 10))),
+        cron(cleanup_orphan_files, minute=set(range(2, 60, 10))),
         cron(expire_approvals, minute=set(range(5, 60, 10))),
     ]
     redis_settings = get_redis_settings()

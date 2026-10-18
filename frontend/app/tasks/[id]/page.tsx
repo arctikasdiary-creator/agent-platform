@@ -45,6 +45,7 @@ export default function TaskDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [socketState, setSocketState] = useState<"connecting" | "open" | "closed">("connecting");
   const [busyApproval, setBusyApproval] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshTask = useCallback(async () => {
@@ -127,6 +128,21 @@ export default function TaskDetailPage() {
     }
   };
 
+  const onDeleteTask = async () => {
+    if (!window.confirm("Удалить задачу безвозвратно?")) {
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.deleteTask(taskId);
+      router.push("/tasks");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось удалить задачу");
+      setDeleting(false);
+    }
+  };
+
   if (!task) {
     return (
       <div className="container">
@@ -157,6 +173,14 @@ export default function TaskDetailPage() {
           <span className={`socket socket-${socketState}`}>
             {SOCKET_LABELS[socketState] ?? socketState}
           </span>
+          <button
+            className="btn btn-danger"
+            type="button"
+            disabled={deleting}
+            onClick={() => void onDeleteTask()}
+          >
+            {deleting ? "Удаляем..." : "Удалить"}
+          </button>
         </div>
       </header>
 

@@ -235,6 +235,17 @@ h2 {
   background: rgba(79, 140, 255, 0.07);
 }
 
+.task-row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-row-wrap .task-row {
+  flex: 1;
+  min-width: 0;
+}
+
 .task-title {
   flex: 1;
   overflow: hidden;

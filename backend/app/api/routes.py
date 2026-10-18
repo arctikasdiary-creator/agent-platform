@@ -20,7 +20,7 @@ from app.core.security import AuthError, create_access_token, decode_user_id, ve
 from app.db.models import Approval, Artifact, Event, Task, TaskSource, User
 from app.db.session import SessionFactory, get_session
 from app.orchestrator.approvals import ApprovalError, decide_approval
-from app.orchestrator.service import create_task
+from app.orchestrator.service import create_task, delete_task
 from app.schemas.api import (
     ApprovalDecision,
     ApprovalOut,
@@ -137,6 +137,12 @@ async def list_tasks(
 @router.get("/tasks/{task_id}", response_model=TaskOut)
 async def get_task_endpoint(task_id: UUID, user: CurrentUser, session: SessionDep) -> Task:
     return await _get_accessible_task(session, task_id, user)
+
+
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task_endpoint(task_id: UUID, user: CurrentUser, session: SessionDep) -> None:
+    task = await _get_accessible_task(session, task_id, user)
+    await delete_task(session, task)
 
 
 @router.get("/tasks/{task_id}/events", response_model=list[EventOut])

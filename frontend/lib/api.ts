@@ -115,6 +115,10 @@ export const api = {
     return request<Task>(`/api/tasks/${taskId}`);
   },
 
+  deleteTask(taskId: string): Promise<void> {
+    return request<void>(`/api/tasks/${taskId}`, { method: "DELETE" });
+  },
+
   decideApproval(approvalId: string, approved: boolean, reason?: string): Promise<Approval> {
     return request<Approval>(`/api/approvals/${approvalId}/decision`, {
       method: "POST",
