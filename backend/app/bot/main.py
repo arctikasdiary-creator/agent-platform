@@ -8,6 +8,7 @@ import redis.asyncio as aioredis
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
@@ -34,10 +35,16 @@ async def _run() -> None:
 
     await init_models()
 
+    session_kwargs: dict[str, object] = {}
+    if settings.telegram_proxy:
+        session_kwargs["proxy"] = settings.telegram_proxy
+    if settings.telegram_api_base_url:
+        session_kwargs["api"] = TelegramAPIServer.from_base(settings.telegram_api_base_url)
+
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-        session=AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else None,
+        session=AiohttpSession(**session_kwargs) if session_kwargs else None,
     )
     dispatcher = Dispatcher()
     access = AccessMiddleware(set(settings.telegram_allowed_user_ids))

@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     telegram_admin_chat_id: int | None = None
     telegram_poll_timeout_seconds: int = 30
     telegram_proxy: str | None = None
+    telegram_api_base_url: str | None = None
 
     jwt_secret_key: str = "change-me-jwt"
     jwt_algorithm: str = "HS256"
