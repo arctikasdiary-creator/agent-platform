@@ -169,7 +169,14 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
             return
 
     async with SessionFactory() as session:
-        step = await session.get(Step, step_uuid, options=[selectinload(Step.task)])
+        step = await session.get(
+            Step,
+            step_uuid,
+            options=[
+                selectinload(Step.task).selectinload(Task.steps),
+                selectinload(Step.approval),
+            ],
+        )
         if step is None or step.task is None:
             logger.error("execute_step: step %s or its task not found", step_id)
             return

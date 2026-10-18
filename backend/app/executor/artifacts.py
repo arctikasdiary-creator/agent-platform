@@ -53,7 +53,7 @@ async def collect_artifacts(
         storage_path = f"{task_id}/{relative}"
         if storage_path in known:
             continue
-        size = await asyncio.to_thread(path.stat().st_size)
+        size = (await asyncio.to_thread(path.stat)).st_size
         if size > settings.artifact_max_bytes:
             logger.warning(
                 "artifact %s of task %s is %d bytes, exceeds the limit, skipped",
