@@ -21,6 +21,7 @@ from app.core.redis import close_arq_pool, get_redis_settings
 from app.db.models import (
     Approval,
     ApprovalStatus,
+    Artifact,
     EventLevel,
     Step,
     StepStatus,
@@ -43,6 +44,95 @@ _SKIPPABLE_STATUSES = (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL)
 _ENVIRONMENT_ERROR_RE = re.compile(
     r"exit code 127|command not found|ModuleNotFoundError|No module named|Exec format error"
 )
+
+_HISTORY_HINT_RE = re.compile(
+    r"(прошл|предыдущ|доработ|дополни|продолж|previous|earlier|continue"
+    r"|same (?:design|style|site|project))",
+    re.IGNORECASE,
+)
+_HISTORY_TEXT_SUFFIXES = {
+    ".html",
+    ".css",
+    ".js",
+    ".json",
+    ".md",
+    ".txt",
+    ".py",
+    ".svg",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".xml",
+    ".yml",
+    ".yaml",
+}
+_HISTORY_MAX_TASKS = 2
+_HISTORY_MAX_CHARS = 8000
+_HISTORY_MAX_FILE_CHARS = 3000
+
+
+async def _build_history_context(session: AsyncSession, task: Task) -> str | None:
+    if task.user_id is None or not _HISTORY_HINT_RE.search(task.prompt):
+        return None
+    previous = (
+        (
+            await session.execute(
+                select(Task)
+                .where(
+                    Task.user_id == task.user_id,
+                    Task.status == TaskStatus.COMPLETED,
+                    Task.id != task.id,
+                    Task.artifacts.any(),
+                )
+                .order_by(Task.created_at.desc())
+                .limit(_HISTORY_MAX_TASKS)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    settings = get_settings()
+    chunks: list[str] = []
+    used = 0
+    for prev in previous:
+        artifacts = (
+            (
+                await session.execute(
+                    select(Artifact)
+                    .where(Artifact.task_id == prev.id)
+                    .order_by(Artifact.filename)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for artifact in artifacts:
+            suffix = Path(artifact.filename).suffix.lower()
+            is_text = artifact.content_type.startswith("text/") or suffix in (
+                _HISTORY_TEXT_SUFFIXES
+            )
+            if not is_text or artifact.size_bytes > 65536:
+                continue
+            path = settings.artifacts_root / artifact.storage_path
+            try:
+                content = await asyncio.to_thread(
+                    path.read_text, encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                continue
+            content = content[: _HISTORY_MAX_FILE_CHARS]
+            chunk = f'--- file: {artifact.filename} (from earlier task "{prev.title}") ---\n{content}'
+            if used + len(chunk) > _HISTORY_MAX_CHARS:
+                return "\n\n".join(chunks) if chunks else None
+            chunks.append(chunk)
+            used += len(chunk)
+    if not chunks:
+        return None
+    header = (
+        "Reference context: files produced by the user's earlier completed task(s). "
+        "Use them ONLY if the current request refers to that earlier work; otherwise ignore this block."
+    )
+    return header + "\n\n" + "\n\n".join(chunks)
 
 
 def _redact_tool_input(tool: ToolName, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -86,8 +176,18 @@ async def plan_task(ctx: dict[str, Any], task_id: str) -> None:
         )
         await session.commit()
 
+        prompt = task.prompt
         try:
-            plan = await Planner().create_plan(title=task.title, prompt=task.prompt)
+            history = await _build_history_context(session, task)
+        except Exception:
+            logger.exception("plan_task: failed to build history context for task %s", task_id)
+            history = None
+        if history:
+            prompt = f"{prompt}\n\n{history}"
+            logger.info("plan_task: added %d chars of history context", len(history))
+
+        try:
+            plan = await Planner().create_plan(title=task.title, prompt=prompt)
         except Exception as exc:
             logger.exception("plan_task: planning failed for task %s", task_id)
             task.status = TaskStatus.FAILED

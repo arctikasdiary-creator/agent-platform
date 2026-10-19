@@ -33,6 +33,11 @@ Sandbox environment constraints (IMPORTANT):
   For HTML/CSS verification, inspect file contents (e.g. grep for media queries) instead of
   taking screenshots; for contrast/validity checks write a short python3 script.
 - If a step seems to require missing software, achieve the same outcome with python3 or shell.
+- The working directory is empty at the start of every task. Files created by any other task
+  (even an earlier task of the same user) are NOT present. Never plan read_file on paths from
+  other tasks such as "previous_design_files". If the request refers to earlier work, recreate
+  everything you need from scratch in a matching style; if a reference context with earlier
+  files is appended to the request, use it.
 - Example of a real verification step (adapt to the actual task, do not copy blindly):
   {"title": "Verify responsive breakpoints", "tool": "run_shell", "tool_input":
    {"command": "python3 -c \"css=open('styles.css').read(); assert css.count('@media')>=3; print('media queries:', css.count('@media'))\"",
@@ -58,6 +63,7 @@ Hard rules:
 - Never run firefox, chromium, xvfb, xvfb-run, node, npm or other third-party binaries in run_shell.
 - run_shell steps must contain real commands that inspect or modify files. Never use echo/printf/true as placeholder "verification" or description steps; a check must exit non-zero when it fails.
 - Never import third-party Python packages (selenium, playwright, requests, beautifulsoup4, PIL, numpy, pandas, etc.) in planned commands; use only the standard library.
+- write_file content must be the complete final file content. Never write placeholder content such as "/* Add your CSS code here */".
 - Do not add a final "finish" step; completion is automatic after the last step.
 - Every step must be executable as-is, without asking the user questions.
 """
@@ -81,6 +87,11 @@ _PRINT_ONLY_PATTERN = re.compile(r"^(echo|printf|true|:)\b", re.IGNORECASE)
 _UNAVAILABLE_COMMAND = re.compile(
     r"\b(selenium|playwright|pyppeteer|puppeteer|requests|bs4|beautifulsoup4|PIL|numpy|pandas)\b"
 )
+_PLACEHOLDER_CONTENT = re.compile(
+    r"add your|your (?:code|content|css|html|styles?|text) here|placeholder"
+    r"|fill (?:in|this)|todo|ваш код|заполните",
+    re.IGNORECASE,
+)
 
 
 def _is_print_only(command: str) -> bool:
@@ -101,7 +112,7 @@ def _is_print_only(command: str) -> bool:
 def _sanitize_plan_steps(plan: Plan) -> Plan:
     kept: list[PlanStep] = []
     dropped = 0
-    for step in plan.steps:
+    for index, step in enumerate(plan.steps, start=1):
         if step.tool is ToolName.RUN_SHELL:
             command = str(step.tool_input.get("command", ""))
             if _is_print_only(command):
@@ -115,6 +126,17 @@ def _sanitize_plan_steps(plan: Plan) -> Plan:
                 )
                 dropped += 1
                 continue
+        elif step.tool is ToolName.WRITE_FILE:
+            content = step.tool_input.get("content")
+            if (
+                isinstance(content, str)
+                and len(content) < 400
+                and _PLACEHOLDER_CONTENT.search(content)
+            ):
+                raise ValueError(
+                    f"step {index} write_file content is a placeholder; write the complete "
+                    "final file content instead of a description of what to write"
+                )
         kept.append(step)
     if dropped == 0:
         return plan
