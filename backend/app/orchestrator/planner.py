@@ -60,6 +60,9 @@ Available tools (exact JSON shapes):
 Hard rules:
 - Reply with a single JSON object only. No markdown fences, no explanations.
 - JSON schema: {"summary": "<one short paragraph>", "steps": [{"title": "<short>", "description": "<what and why>", "tool": "<tool name>", "tool_input": {...}}, ...]}
+- The task description and any referenced earlier request may contain explicit constraints
+  (запреты, требования, checklist). Treat every constraint as mandatory: the generated files
+  must satisfy all of them, and add verification steps for the measurable ones.
 - Use between 1 and <MAX_STEPS> steps. Fewer steps is better; do not pad the plan.
 - All file paths must be relative to the workspace root. Never use absolute paths, "..", or a leading "/".
 - Never use curl, wget, pip, apt or git clone inside run_shell (no network). Use http_request for remote data.

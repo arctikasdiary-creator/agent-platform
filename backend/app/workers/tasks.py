@@ -148,6 +148,13 @@ async def _build_history_context(session: AsyncSession, task: Task) -> str | Non
     chunks: list[str] = []
     used = 0
     for prev in previous:
+        request_chunk = (
+            f'--- earlier task: "{prev.title}" ---\nRequest: {prev.prompt.strip()[:1500]}'
+        )
+        if used + len(request_chunk) > _HISTORY_MAX_CHARS:
+            return "\n\n".join(chunks) if chunks else None
+        chunks.append(request_chunk)
+        used += len(request_chunk)
         artifacts = (
             (
                 await session.execute(
@@ -187,9 +194,10 @@ async def _build_history_context(session: AsyncSession, task: Task) -> str | Non
     if not chunks:
         return None
     header = (
-        "Reference context: files produced by the user's earlier completed task(s). "
-        "These files have been copied into the working directory and may be read or modified. "
-        "Use them ONLY if the current request refers to that earlier work; otherwise ignore this block."
+        "Reference context from the user's earlier completed task(s): their original request "
+        "and the files they produced (files are also copied into the working directory). "
+        "Constraints and criteria from the earlier request remain in effect. "
+        "Use this context ONLY if the current request refers to that earlier work."
     )
     return header + "\n\n" + "\n\n".join(chunks)
 
