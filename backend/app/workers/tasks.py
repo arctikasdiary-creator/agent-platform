@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import time
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,10 @@ from app.orchestrator.scheduler import Scheduler
 logger = logging.getLogger(__name__)
 
 _SKIPPABLE_STATUSES = (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL)
+
+_ENVIRONMENT_ERROR_RE = re.compile(
+    r"exit code 127|command not found|ModuleNotFoundError|No module named|Exec format error"
+)
 
 
 def _redact_tool_input(tool: ToolName, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -296,6 +301,30 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
         except Exception as exc:
             logger.exception("execute_step: unexpected error in step %s", step_id)
             error_text = f"internal error: {exc}"
+
+        if (
+            error_text is not None
+            and step.tool is ToolName.RUN_SHELL
+            and _ENVIRONMENT_ERROR_RE.search(error_text)
+        ):
+            step.status = StepStatus.SKIPPED
+            step.error = error_text
+            step.finished_at = datetime.now(UTC)
+            await publish_event(
+                session,
+                task_uuid,
+                EventKind.STEP_SKIPPED,
+                f"Step {step.position + 1} skipped: required tool or module is not "
+                "available in the sandbox",
+                step_id=step.id,
+                level=EventLevel.WARNING,
+                payload={"error": error_text[:2000]},
+            )
+            await session.commit()
+            enqueued = await scheduler.enqueue_next_step(session, task_uuid)
+            if not enqueued:
+                await _finalize_task(session, task, result=step.output)
+            return
 
         if error_text is not None:
             if step.attempts < settings.step_max_attempts:
