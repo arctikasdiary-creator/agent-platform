@@ -43,7 +43,14 @@ _SKIPPABLE_STATUSES = (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL)
 
 _ENVIRONMENT_ERROR_RE = re.compile(
     r"exit code 127|command not found|ModuleNotFoundError|No module named|Exec format error"
-    r"|file not found|directory not found"
+    r"|file not found|directory not found|No such file or directory"
+)
+
+_SEED_MAX_FILE_BYTES = 262144
+_SEED_MIN_FILE_BYTES = 8
+_ARTIFACT_NAME_RE = re.compile(r"^[\w][\w./ -]*$")
+_VERIFICATION_RE = re.compile(
+    r"(?:verify|check|validate|test|провер|тест)", re.IGNORECASE
 )
 
 _HISTORY_HINT_RE = re.compile(
@@ -72,10 +79,10 @@ _HISTORY_MAX_CHARS = 8000
 _HISTORY_MAX_FILE_CHARS = 3000
 
 
-async def _build_history_context(session: AsyncSession, task: Task) -> str | None:
+async def _recent_completed_tasks(session: AsyncSession, task: Task) -> list[Task]:
     if task.user_id is None or not _HISTORY_HINT_RE.search(task.prompt):
-        return None
-    previous = (
+        return []
+    tasks = (
         (
             await session.execute(
                 select(Task)
@@ -92,6 +99,51 @@ async def _build_history_context(session: AsyncSession, task: Task) -> str | Non
         .scalars()
         .all()
     )
+    return list(tasks)
+
+
+async def _seed_history_files(session: AsyncSession, task: Task) -> set[str]:
+    previous = await _recent_completed_tasks(session, task)
+    if not previous:
+        return set()
+    settings = get_settings()
+    workspace = settings.workspaces_root / str(task.id)
+    seeded: set[str] = set()
+    for prev in previous:
+        artifacts = (
+            (
+                await session.execute(
+                    select(Artifact)
+                    .where(Artifact.task_id == prev.id)
+                    .order_by(Artifact.filename)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for artifact in artifacts:
+            if (
+                artifact.size_bytes < _SEED_MIN_FILE_BYTES
+                or artifact.size_bytes > _SEED_MAX_FILE_BYTES
+                or not _ARTIFACT_NAME_RE.match(artifact.filename)
+            ):
+                continue
+            source = settings.artifacts_root / artifact.storage_path
+            target = workspace / artifact.filename
+            if not source.is_file() or target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.copy2, source, target)
+            seeded.add(artifact.filename)
+    if seeded:
+        logger.info("plan_task: seeded %d reference file(s) into the workspace", len(seeded))
+    return seeded
+
+
+async def _build_history_context(session: AsyncSession, task: Task) -> str | None:
+    previous = await _recent_completed_tasks(session, task)
+    if not previous:
+        return None
     settings = get_settings()
     chunks: list[str] = []
     used = 0
@@ -112,7 +164,12 @@ async def _build_history_context(session: AsyncSession, task: Task) -> str | Non
             is_text = artifact.content_type.startswith("text/") or suffix in (
                 _HISTORY_TEXT_SUFFIXES
             )
-            if not is_text or artifact.size_bytes > 65536:
+            if (
+                not is_text
+                or artifact.size_bytes < _SEED_MIN_FILE_BYTES
+                or artifact.size_bytes > 65536
+                or not _ARTIFACT_NAME_RE.match(artifact.filename)
+            ):
                 continue
             path = settings.artifacts_root / artifact.storage_path
             try:
@@ -131,6 +188,7 @@ async def _build_history_context(session: AsyncSession, task: Task) -> str | Non
         return None
     header = (
         "Reference context: files produced by the user's earlier completed task(s). "
+        "These files have been copied into the working directory and may be read or modified. "
         "Use them ONLY if the current request refers to that earlier work; otherwise ignore this block."
     )
     return header + "\n\n" + "\n\n".join(chunks)
@@ -178,6 +236,11 @@ async def plan_task(ctx: dict[str, Any], task_id: str) -> None:
         await session.commit()
 
         prompt = task.prompt
+        seeded_paths: set[str] = set()
+        try:
+            seeded_paths = await _seed_history_files(session, task)
+        except Exception:
+            logger.exception("plan_task: failed to seed history files for task %s", task_id)
         try:
             history = await _build_history_context(session, task)
         except Exception:
@@ -188,7 +251,9 @@ async def plan_task(ctx: dict[str, Any], task_id: str) -> None:
             logger.info("plan_task: added %d chars of history context", len(history))
 
         try:
-            plan = await Planner().create_plan(title=task.title, prompt=prompt)
+            plan = await Planner().create_plan(
+                title=task.title, prompt=prompt, available_paths=seeded_paths
+            )
         except Exception as exc:
             logger.exception("plan_task: planning failed for task %s", task_id)
             task.status = TaskStatus.FAILED
@@ -403,11 +468,17 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
             logger.exception("execute_step: unexpected error in step %s", step_id)
             error_text = f"internal error: {exc}"
 
-        if (
-            error_text is not None
-            and step.tool in (ToolName.RUN_SHELL, ToolName.READ_FILE, ToolName.LIST_DIR)
-            and _ENVIRONMENT_ERROR_RE.search(error_text)
-        ):
+        skip_reason: str | None = None
+        if error_text is not None:
+            if (
+                step.tool in (ToolName.RUN_SHELL, ToolName.READ_FILE, ToolName.LIST_DIR)
+                and _ENVIRONMENT_ERROR_RE.search(error_text)
+            ):
+                skip_reason = "required tool, module or file is not available in the sandbox"
+            elif step.tool is ToolName.RUN_SHELL and _VERIFICATION_RE.search(step.title):
+                skip_reason = "verification failed, deliverables were kept"
+
+        if skip_reason is not None:
             step.status = StepStatus.SKIPPED
             step.error = error_text
             step.finished_at = datetime.now(UTC)
@@ -415,8 +486,7 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
                 session,
                 task_uuid,
                 EventKind.STEP_SKIPPED,
-                f"Step {step.position + 1} skipped: required tool, module or file is not "
-                "available in the sandbox",
+                f"Step {step.position + 1} skipped: {skip_reason}",
                 step_id=step.id,
                 level=EventLevel.WARNING,
                 payload={"error": error_text[:2000]},

@@ -36,7 +36,7 @@ async def _run() -> None:
 
     await init_models()
 
-    session_kwargs: dict[str, object] = {}
+    session_kwargs: dict[str, object] = {"timeout": 120.0}
     if settings.telegram_proxy:
         session_kwargs["proxy"] = settings.telegram_proxy
     if settings.telegram_api_base_url:

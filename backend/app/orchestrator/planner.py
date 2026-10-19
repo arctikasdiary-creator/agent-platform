@@ -34,14 +34,13 @@ Sandbox environment constraints (IMPORTANT):
   taking screenshots; for contrast/validity checks write a short python3 script.
 - If a step seems to require missing software, achieve the same outcome with python3 or shell.
 - The working directory is empty at the start of every task. Files created by any other task
-  (even an earlier task of the same user) are NOT present. Never plan read_file on paths from
-  other tasks such as "previous_design_files". If the request refers to earlier work, recreate
-  everything you need from scratch in a matching style; if a reference context with earlier
-  files is appended to the request, use it.
-- Reference context files are shown in the request text only - they are NOT in the working
-  directory. Never plan read_file or "modify" steps for them; use their content directly and
-  write the complete new file with write_file. read_file may only target files created by an
-  earlier step of the same plan.
+  (even an earlier task of the same user) are NOT present - except when a "Reference context"
+  block is appended to the request: those earlier-task files have been copied into the working
+  directory and may be read or modified directly.
+- Never reference paths that are neither created by earlier steps of this plan nor copied from
+  the reference context. When continuing earlier work, prefer writing the complete updated file
+  with write_file over fragile in-place sed edits, unless the change is small and the target
+  file is present.
 - Example of a real verification step (adapt to the actual task, do not copy blindly):
   {"title": "Verify responsive breakpoints", "tool": "run_shell", "tool_input":
    {"command": "python3 -c \"css=open('styles.css').read(); assert css.count('@media')>=3; print('media queries:', css.count('@media'))\"",
@@ -96,6 +95,29 @@ _PLACEHOLDER_CONTENT = re.compile(
     r"|fill (?:in|this)|todo|ваш код|заполните",
     re.IGNORECASE,
 )
+_FILE_REF_PATTERN = re.compile(
+    r"[\w./-]+\.(?:html|css|js|ts|json|md|txt|py|sh|svg|xml|yml|yaml)\b"
+)
+_SHELL_ASSERT_PATTERN = re.compile(r"(?:^|[;&|]\s*)assert\s")
+
+
+def _missing_file_refs(
+    command: str, existing: set[str], earlier_commands: list[str]
+) -> list[str]:
+    missing: list[str] = []
+    for match in _FILE_REF_PATTERN.finditer(command):
+        token = match.group(0)
+        normalized = token[2:] if token.startswith("./") else token
+        if token in existing or normalized in existing:
+            continue
+        if any(token in earlier for earlier in earlier_commands):
+            continue
+        if re.search(rf">>?\s*{re.escape(token)}\b", command):
+            continue
+        if re.search(rf"\btee\s+(?:-a\s+)?{re.escape(token)}\b", command):
+            continue
+        missing.append(token)
+    return missing
 
 
 def _is_print_only(command: str) -> bool:
@@ -113,10 +135,10 @@ def _is_print_only(command: str) -> bool:
     return True
 
 
-def _sanitize_plan_steps(plan: Plan) -> Plan:
+def _sanitize_plan_steps(plan: Plan, available_paths: set[str] | None = None) -> Plan:
     kept: list[PlanStep] = []
     dropped = 0
-    created_paths: set[str] = set()
+    created_paths: set[str] = set(available_paths or ())
     shell_commands: list[str] = []
     for index, step in enumerate(plan.steps, start=1):
         if step.tool is ToolName.READ_FILE:
@@ -142,6 +164,23 @@ def _sanitize_plan_steps(plan: Plan) -> Plan:
                 logger.warning(
                     "planner produced step %r using unavailable third-party packages; dropping it",
                     step.title,
+                )
+                dropped += 1
+                continue
+            if _SHELL_ASSERT_PATTERN.search(command):
+                logger.warning(
+                    "planner produced step %r using the non-existent shell 'assert' command; "
+                    "dropping it",
+                    step.title,
+                )
+                dropped += 1
+                continue
+            missing = _missing_file_refs(command, created_paths, shell_commands)
+            if missing:
+                logger.warning(
+                    "planner produced step %r referencing missing file(s) %s; dropping it",
+                    step.title,
+                    ", ".join(sorted(set(missing))),
                 )
                 dropped += 1
                 continue
@@ -177,7 +216,9 @@ class Planner:
         self._client = client or get_llm_client()
         self._settings = get_settings()
 
-    async def create_plan(self, *, title: str, prompt: str) -> Plan:
+    async def create_plan(
+        self, *, title: str, prompt: str, available_paths: set[str] | None = None
+    ) -> Plan:
         system_prompt = PLANNER_SYSTEM_PROMPT.replace(
             "<MAX_STEPS>", str(self._settings.max_steps_per_task)
         ).replace("<SANDBOX_IMAGE>", self._settings.sandbox_image)
@@ -201,7 +242,7 @@ class Planner:
                         f"plan has {len(plan.steps)} steps but the limit is "
                         f"{self._settings.max_steps_per_task}"
                     )
-                plan = _sanitize_plan_steps(plan)
+                plan = _sanitize_plan_steps(plan, available_paths)
                 logger.info("planner produced %d steps for task %r", len(plan.steps), title)
                 return plan
             except (ValidationError, ValueError) as exc:
