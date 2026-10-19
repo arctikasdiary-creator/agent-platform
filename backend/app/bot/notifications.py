@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,20 @@ async def listen(bot: Bot, client: Redis) -> None:
             await pubsub.aclose()
 
 
+async def _retry(call: Callable[[], Awaitable[Any]], *, attempts: int = 3) -> None:
+    for attempt in range(1, attempts + 1):
+        try:
+            await call()
+            return
+        except Exception:
+            if attempt == attempts:
+                raise
+            logger.warning(
+                "transient Telegram send error (attempt %d/%d), retrying", attempt, attempts
+            )
+            await asyncio.sleep(2 * attempt)
+
+
 async def _handle_event(bot: Bot, event: dict[str, Any]) -> None:
     kind = str(event.get("kind") or "")
     payload = event.get("payload") or {}
@@ -108,7 +124,10 @@ async def _handle_event(bot: Bot, event: dict[str, Any]) -> None:
             ]
         )
 
-    await bot.send_message(chat_id, text, reply_markup=keyboard)
+    try:
+        await _retry(lambda: bot.send_message(chat_id, text, reply_markup=keyboard))
+    except Exception:
+        logger.exception("failed to send notification message for task %s", task_id)
     if kind == EventKind.TASK_COMPLETED.value:
         await _send_artifacts(bot, chat_id, task_id)
 
@@ -179,6 +198,10 @@ async def _send_artifacts(bot: Bot, chat_id: int, task_id: UUID) -> None:
             continue
         try:
             safe_name = artifact.filename.split("/")[-1]
-            await bot.send_document(chat_id, FSInputFile(path, filename=safe_name))
+            await _retry(
+                lambda path=path, safe_name=safe_name: bot.send_document(
+                    chat_id, FSInputFile(path, filename=safe_name)
+                )
+            )
         except Exception:
             logger.exception("failed to send artifact %s of task %s", artifact.filename, task_id)
