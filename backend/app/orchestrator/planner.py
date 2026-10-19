@@ -41,6 +41,15 @@ Sandbox environment constraints (IMPORTANT):
   the reference context. When continuing earlier work, prefer writing the complete updated file
   with write_file over fragile in-place sed edits, unless the change is small and the target
   file is present.
+- When the request references an external website as an example, add one http_request GET step to
+  fetch it for reference, then author the complete rewritten files yourself from the user's
+  requirements. The fetched content is not available to write_file at plan time.
+- Example of a complete plan with full file contents (content is shortened only in formatting here,
+  everything inside "content" must be the real complete file):
+  {"title": "Create index.html", "description": "Landing page markup", "tool": "write_file",
+   "tool_input": {"path": "index.html", "content": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>Coffee</title>\n<link rel=\"stylesheet\" href=\"styles.css\">\n</head>\n<body>\n<header><h1>Coffee</h1></header>\n<main><p>Fresh roast daily.</p>\n<button class=\"cta\">Order</button></main>\n</body>\n</html>"}}
+  {"title": "Create styles.css", "description": "Coffee palette, CTA states, responsive",
+   "tool": "write_file", "tool_input": {"path": "styles.css", "content": "body{font-family:Arial,sans-serif;background:#f5efe6;color:#3e2723;margin:0;padding:1rem}\nheader{text-align:center}\n.cta{min-height:48px;font-size:1rem;background:#6d4c41;color:#fff8f0;border:0;border-radius:10px;padding:.75rem 2rem}\n.cta:hover{background:#c68b59}\n.cta:active{background:#3e2723}\n.cta:focus-visible{outline:3px solid #c68b59;outline-offset:2px}\n@media (max-width:320px){.cta{width:100%}}"}}
 - Example of a real verification step (adapt to the actual task, do not copy blindly):
   {"title": "Verify responsive breakpoints", "tool": "run_shell", "tool_input":
    {"command": "python3 -c \"css=open('styles.css').read(); assert css.count('@media')>=3; print('media queries:', css.count('@media'))\"",
@@ -69,7 +78,7 @@ Hard rules:
 - Never run firefox, chromium, xvfb, xvfb-run, node, npm or other third-party binaries in run_shell.
 - run_shell steps must contain real commands that inspect or modify files. Never use echo/printf/true as placeholder "verification" or description steps; a check must exit non-zero when it fails.
 - Never import third-party Python packages (selenium, playwright, requests, beautifulsoup4, PIL, numpy, pandas, etc.) in planned commands; use only the standard library.
-- write_file content must be the complete final file content. Never write placeholder content such as "/* Add your CSS code here */".
+- write_file content must be the complete final file content, authored now at plan time. Never write placeholder content such as "/* Add your CSS code here */" or skeleton comments like "<!-- Menu items will be inserted here -->". You cannot fill the content later from earlier step outputs.
 - Do not add a final "finish" step; completion is automatic after the last step.
 - Every step must be executable as-is, without asking the user questions.
 """
@@ -95,7 +104,9 @@ _UNAVAILABLE_COMMAND = re.compile(
 )
 _PLACEHOLDER_CONTENT = re.compile(
     r"add your|your (?:code|content|css|html|styles?|text) here|placeholder"
-    r"|fill (?:in|this)|todo|ваш код|заполните",
+    r"|fill (?:in|this)|todo|ваш код|заполните"
+    r"|will be (?:inserted|added|filled|generated)|insert(?:ed)? here"
+    r"|to be (?:inserted|added|filled|generated)|coming soon",
     re.IGNORECASE,
 )
 _FILE_REF_PATTERN = re.compile(
@@ -191,7 +202,7 @@ def _sanitize_plan_steps(plan: Plan, available_paths: set[str] | None = None) ->
             content = step.tool_input.get("content")
             if (
                 isinstance(content, str)
-                and len(content) < 400
+                and len(content) < 1200
                 and _PLACEHOLDER_CONTENT.search(content)
             ):
                 raise ValueError(
