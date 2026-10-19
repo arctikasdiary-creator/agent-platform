@@ -38,6 +38,10 @@ Sandbox environment constraints (IMPORTANT):
   other tasks such as "previous_design_files". If the request refers to earlier work, recreate
   everything you need from scratch in a matching style; if a reference context with earlier
   files is appended to the request, use it.
+- Reference context files are shown in the request text only - they are NOT in the working
+  directory. Never plan read_file or "modify" steps for them; use their content directly and
+  write the complete new file with write_file. read_file may only target files created by an
+  earlier step of the same plan.
 - Example of a real verification step (adapt to the actual task, do not copy blindly):
   {"title": "Verify responsive breakpoints", "tool": "run_shell", "tool_input":
    {"command": "python3 -c \"css=open('styles.css').read(); assert css.count('@media')>=3; print('media queries:', css.count('@media'))\"",
@@ -112,8 +116,23 @@ def _is_print_only(command: str) -> bool:
 def _sanitize_plan_steps(plan: Plan) -> Plan:
     kept: list[PlanStep] = []
     dropped = 0
+    created_paths: set[str] = set()
+    shell_commands: list[str] = []
     for index, step in enumerate(plan.steps, start=1):
-        if step.tool is ToolName.RUN_SHELL:
+        if step.tool is ToolName.READ_FILE:
+            path = str(step.tool_input.get("path", ""))
+            if path not in created_paths and not any(
+                path in command for command in shell_commands
+            ):
+                logger.warning(
+                    "planner produced read_file step %r for %r which no earlier step creates; "
+                    "dropping it",
+                    step.title,
+                    path,
+                )
+                dropped += 1
+                continue
+        elif step.tool is ToolName.RUN_SHELL:
             command = str(step.tool_input.get("command", ""))
             if _is_print_only(command):
                 logger.warning("planner produced placeholder step %r; dropping it", step.title)
@@ -138,12 +157,17 @@ def _sanitize_plan_steps(plan: Plan) -> Plan:
                     "final file content instead of a description of what to write"
                 )
         kept.append(step)
+        if step.tool is ToolName.WRITE_FILE:
+            created_paths.add(str(step.tool_input.get("path", "")))
+        elif step.tool is ToolName.RUN_SHELL:
+            shell_commands.append(str(step.tool_input.get("command", "")))
     if dropped == 0:
         return plan
     if not kept:
         raise ValueError(
-            "all planned steps were placeholder commands or rely on unavailable packages; "
-            "produce a real plan using only the Python standard library and shell utilities"
+            "all planned steps were placeholder commands, relied on unavailable packages, "
+            "or read files that no step of the plan creates; produce a real plan that writes "
+            "the files first and uses only the Python standard library and shell utilities"
         )
     return plan.model_copy(update={"steps": kept})
 

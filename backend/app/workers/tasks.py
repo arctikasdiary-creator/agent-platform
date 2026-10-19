@@ -43,6 +43,7 @@ _SKIPPABLE_STATUSES = (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL)
 
 _ENVIRONMENT_ERROR_RE = re.compile(
     r"exit code 127|command not found|ModuleNotFoundError|No module named|Exec format error"
+    r"|file not found|directory not found"
 )
 
 _HISTORY_HINT_RE = re.compile(
@@ -404,7 +405,7 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
 
         if (
             error_text is not None
-            and step.tool is ToolName.RUN_SHELL
+            and step.tool in (ToolName.RUN_SHELL, ToolName.READ_FILE, ToolName.LIST_DIR)
             and _ENVIRONMENT_ERROR_RE.search(error_text)
         ):
             step.status = StepStatus.SKIPPED
@@ -414,7 +415,7 @@ async def execute_step(ctx: dict[str, Any], task_id: str, step_id: str) -> None:
                 session,
                 task_uuid,
                 EventKind.STEP_SKIPPED,
-                f"Step {step.position + 1} skipped: required tool or module is not "
+                f"Step {step.position + 1} skipped: required tool, module or file is not "
                 "available in the sandbox",
                 step_id=step.id,
                 level=EventLevel.WARNING,
